@@ -69,11 +69,15 @@ fn generate_sine_wave(frequency: f32, duration_ms: u64, volume: f32) -> Vec<f32>
     samples
 }
 
-fn play_alert_sound(player: &Player) {
-    // C5 → E5 → G5 ascending triad, played twice
+fn play_alert_sound(player: &Player, direction: &AlertDirection) {
+    // C5 → E5 → G5 triad; Above = ascending, Below = descending
     let notes = [523.25f32, 659.25, 783.99];
+    let notes_ordered: Vec<f32> = match direction {
+        AlertDirection::Above => notes.to_vec(),
+        AlertDirection::Below => notes.iter().copied().rev().collect(),
+    };
     for _repeat in 0..2 {
-        for &freq in &notes {
+        for &freq in &notes_ordered {
             let samples = generate_sine_wave(freq, 150, 0.4);
             let source = rodio::buffer::SamplesBuffer::new(nz!(1), nz!(44100), samples);
             player.append(source);
@@ -508,7 +512,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     if triggered {
                         alert.last_triggered = Some(Instant::now());
-                        play_alert_sound(&player);
+                        play_alert_sound(&player, &alert.direction);
                     }
                 }
             }
