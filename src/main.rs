@@ -93,6 +93,37 @@ fn play_alert_sound(player: &Player, direction: &AlertDirection) {
     }
 }
 
+fn generate_sine_wave_fade_out(frequency: f32, duration_ms: u64, volume: f32, fade_out_ms: u64) -> Vec<f32> {
+    let sample_rate = 44100u32;
+    let num_samples = (sample_rate as u64 * duration_ms / 1000) as usize;
+    let fade_samples = (sample_rate as u64 * fade_out_ms / 1000) as usize;
+    let mut samples = Vec::with_capacity(num_samples);
+
+    for i in 0..num_samples {
+        let t = i as f32 / sample_rate as f32;
+        let envelope = if i + fade_samples >= num_samples {
+            (num_samples - i) as f32 / fade_samples as f32
+        } else {
+            1.0
+        };
+        let sample = (t * frequency * 2.0 * std::f32::consts::PI).sin() * volume * envelope;
+        samples.push(sample);
+    }
+    samples
+}
+
+fn play_disconnect_sound(player: &Player) {
+    // C5 (523.25 Hz) for 200ms, then G4 (392.00 Hz) for 300ms with quick fade-out (transposed 2 octaves up from C3/G2)
+    const C5: f32 = 523.25;
+    const G4: f32 = 392.00;
+
+    let c5_samples = generate_sine_wave(C5, 200, 0.5);
+    player.append(rodio::buffer::SamplesBuffer::new(nz!(1), nz!(44100), c5_samples));
+
+    let g4_samples = generate_sine_wave_fade_out(G4, 300, 0.5, 50);
+    player.append(rodio::buffer::SamplesBuffer::new(nz!(1), nz!(44100), g4_samples));
+}
+
 // ── Application state ───────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -437,6 +468,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let player = Player::connect_new(stream_handle.mixer());
 
     let (tx, mut rx) = mpsc::channel::<f64>(256);
+    let (disconnect_tx, mut disconnect_rx) = mpsc::channel::<()>(8);
 
     // ── WebSocket task ──────────────────────────────────────────────────
     let ws_state = state.clone();
@@ -480,10 +512,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut s = ws_state.lock().unwrap();
                         s.status = ConnectionStatus::Disconnected;
                     }
+                    let _ = disconnect_tx.send(()).await;
                 }
                 Err(_) => {
                     let mut s = ws_state.lock().unwrap();
                     s.status = ConnectionStatus::Disconnected;
+                    // No disconnect sound — we never had a connection
                 }
             }
 
@@ -495,9 +529,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut flash_counter: u32 = 0;
     let mut need_full_redraw = true; // initial full render after Clear
     let mut last_rendered_status: Option<ConnectionStatus> = None;
+    let mut last_disconnect_sound: Option<Instant> = None;
 
     loop {
         let mut got_new_price = false;
+
+        // Process disconnect events — play alert sound (with debounce)
+        while let Ok(()) = disconnect_rx.try_recv() {
+            let can_trigger = last_disconnect_sound.map_or(true, |t| {
+                t.elapsed() >= Duration::from_secs(ALERT_DEBOUNCE_SECS)
+            });
+            if can_trigger {
+                last_disconnect_sound = Some(Instant::now());
+                play_disconnect_sound(&player);
+            }
+        }
 
         // Process incoming prices
         while let Ok(price) = rx.try_recv() {
