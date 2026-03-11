@@ -11,7 +11,7 @@ use rodio::{nz, DeviceSinkBuilder, Player, Source};
 use serde::Deserialize;
 use std::io::{stdout, Write};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 
@@ -40,11 +40,13 @@ impl std::fmt::Display for AlertDirection {
     }
 }
 
+const ALERT_DEBOUNCE_SECS: u64 = 5;
+
 #[derive(Clone, Debug)]
 struct Alert {
     price: f64,
     direction: AlertDirection,
-    triggered: bool,
+    last_triggered: Option<Instant>,
 }
 
 // ── Sound generation ────────────────────────────────────────────────────────
@@ -67,31 +69,24 @@ fn generate_sine_wave(frequency: f32, duration_ms: u64, volume: f32) -> Vec<f32>
     samples
 }
 
-fn play_alert_sound() {
-    std::thread::spawn(|| {
-        if let Ok(mut stream_handle) = DeviceSinkBuilder::open_default_sink() {
-            stream_handle.log_on_drop(false);
-            let player = Player::connect_new(stream_handle.mixer());
-                // C5 → E5 → G5 ascending triad, played twice
-                let notes = [523.25f32, 659.25, 783.99];
-                for _repeat in 0..2 {
-                    for &freq in &notes {
-                        let samples = generate_sine_wave(freq, 150, 0.4);
-                        let source = rodio::buffer::SamplesBuffer::new(nz!(1), nz!(44100), samples);
-                        player.append(source);
-                        player.append(rodio::source::Zero::new(nz!(1), nz!(44100)).take_duration(
-                            Duration::from_millis(30),
-                        ));
-                    }
-                    // Pause between repeats
-                    player.append(
-                        rodio::source::Zero::new(nz!(1), nz!(44100))
-                            .take_duration(Duration::from_millis(200)),
-                    );
-                }
-                player.sleep_until_end();
+fn play_alert_sound(player: &Player) {
+    // C5 → E5 → G5 ascending triad, played twice
+    let notes = [523.25f32, 659.25, 783.99];
+    for _repeat in 0..2 {
+        for &freq in &notes {
+            let samples = generate_sine_wave(freq, 150, 0.4);
+            let source = rodio::buffer::SamplesBuffer::new(nz!(1), nz!(44100), samples);
+            player.append(source);
+            player.append(rodio::source::Zero::new(nz!(1), nz!(44100)).take_duration(
+                Duration::from_millis(30),
+            ));
         }
-    });
+        // Pause between repeats
+        player.append(
+            rodio::source::Zero::new(nz!(1), nz!(44100))
+                .take_duration(Duration::from_millis(200)),
+        );
+    }
 }
 
 // ── Application state ───────────────────────────────────────────────────────
@@ -226,7 +221,7 @@ fn render(state: &AppState, full_redraw: bool) -> std::io::Result<()> {
     // ── Alert info ──────────────────────────────────────────────────────
     let alert_row = center_row;
     if let Some(ref alert) = state.alert {
-        if alert.triggered {
+        if alert.last_triggered.is_some() {
             let msg = format!(
                 "⚡ ALERT TRIGGERED — Price went {} ${:.2}",
                 alert.direction, alert.price
@@ -343,6 +338,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         alert_flash: false,
     }));
 
+    // Single long-lived audio output — avoids repeated opening/closing of device on Linux
+    let mut stream_handle = DeviceSinkBuilder::open_default_sink().expect("Cannot open audio device");
+    stream_handle.log_on_drop(false);
+    let player = Player::connect_new(stream_handle.mixer());
+
     let (tx, mut rx) = mpsc::channel::<f64>(256);
 
     // ── WebSocket task ──────────────────────────────────────────────────
@@ -404,16 +404,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             s.prev_price = s.price;
             s.price = Some(price);
 
-            // Check alert
+            // Check alert (with 5s debounce — can trigger again after cooldown)
             if let Some(ref mut alert) = s.alert {
-                if !alert.triggered {
+                let can_trigger = alert.last_triggered.map_or(true, |t| {
+                    t.elapsed() >= Duration::from_secs(ALERT_DEBOUNCE_SECS)
+                });
+                if can_trigger {
                     let triggered = match alert.direction {
                         AlertDirection::Above => price >= alert.price,
                         AlertDirection::Below => price <= alert.price,
                     };
                     if triggered {
-                        alert.triggered = true;
-                        play_alert_sound();
+                        alert.last_triggered = Some(Instant::now());
+                        play_alert_sound(&player);
                     }
                 }
             }
@@ -464,7 +467,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     s.alert = Some(Alert {
                                         price,
                                         direction: s.alert_direction.clone(),
-                                        triggered: false,
+                                        last_triggered: None,
                                     });
                                 }
                             }
