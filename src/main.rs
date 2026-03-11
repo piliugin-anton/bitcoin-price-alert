@@ -494,6 +494,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Main event loop ─────────────────────────────────────────────────
     let mut flash_counter: u32 = 0;
     let mut need_full_redraw = true; // initial full render after Clear
+    let mut last_rendered_status: Option<ConnectionStatus> = None;
 
     loop {
         let mut got_new_price = false;
@@ -590,12 +591,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Render: full redraw on resize/key; otherwise only price (and alert when flashing)
+        // Render: full redraw on resize/key; otherwise price, status, alert when changed
         let s = state.lock().unwrap();
+        let status_changed = last_rendered_status.as_ref() != Some(&s.status);
+        if status_changed {
+            last_rendered_status = Some(s.status.clone());
+        }
         if need_full_redraw {
             render(&s, true)?;
             need_full_redraw = false;
-        } else if got_new_price || s.alert.as_ref().and_then(|a| a.last_triggered).is_some() {
+            last_rendered_status = Some(s.status.clone());
+        } else if got_new_price || s.alert.as_ref().and_then(|a| a.last_triggered).is_some() || status_changed {
             render_partial(&s)?;
         }
     }
