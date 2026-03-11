@@ -457,17 +457,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     let (_, mut read) = ws_stream.split();
 
-                    while let Some(msg) = read.next().await {
-                        match msg {
-                            Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
-                                if let Ok(trade) = serde_json::from_str::<BinanceTrade>(&text) {
-                                    if let Ok(price) = trade.price.parse::<f64>() {
-                                        let _ = tx.send(price).await;
+                    const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+                    loop {
+                        match tokio::time::timeout(IDLE_TIMEOUT, read.next()).await {
+                            Ok(Some(msg)) => match msg {
+                                Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
+                                    if let Ok(trade) = serde_json::from_str::<BinanceTrade>(&text) {
+                                        if let Ok(price) = trade.price.parse::<f64>() {
+                                            let _ = tx.send(price).await;
+                                        }
                                     }
                                 }
-                            }
-                            Err(_) => break,
-                            _ => {}
+                                Err(_) => break,
+                                _ => {}
+                            },
+                            Ok(None) => break,
+                            Err(_) => break, // no message in 30s — reconnect
                         }
                     }
 
