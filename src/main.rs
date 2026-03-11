@@ -313,6 +313,95 @@ fn render(state: &AppState, full_redraw: bool) -> std::io::Result<()> {
     .and_then(std::convert::identity)
 }
 
+/// Redraws only the price row, status row, and optionally the alert row (when alert is flashing).
+/// Used when only price changed or when alert flash toggles — avoids full UI redraw.
+fn render_partial(state: &AppState) -> std::io::Result<()> {
+    let (cols, rows) = terminal::size()?;
+    let w = cols as usize;
+    let center_row = rows / 2;
+    let price_row = center_row.saturating_sub(3);
+    let alert_row = center_row;
+
+    let mut out = stdout();
+    out.sync_update(|out| {
+        execute!(out, cursor::Hide)?;
+
+        // ── Status row (top right) ─────────────────────────────────────────
+        let status_str = format!("{}", state.status);
+        let status_col = if w > status_str.len() + 2 { w - status_str.len() - 2 } else { 0 };
+        execute!(out, cursor::MoveTo(0, 1), terminal::Clear(ClearType::CurrentLine))?;
+        execute!(out, cursor::MoveTo(status_col as u16, 1))?;
+        let status_color = match state.status {
+            ConnectionStatus::Connected => Color::Green,
+            ConnectionStatus::Connecting => Color::Yellow,
+            ConnectionStatus::Disconnected => Color::Red,
+        };
+        execute!(
+            out,
+            SetForegroundColor(status_color),
+            Print(&status_str),
+            ResetColor
+        )?;
+
+        // ── Price row ──────────────────────────────────────────────────────
+        execute!(out, cursor::MoveTo(0, price_row as u16), terminal::Clear(ClearType::CurrentLine))?;
+        if let Some(price) = state.price {
+            let price_str = format!("$ {:.2}", price);
+            let px = w.saturating_sub(price_str.len()) / 2;
+            let is_up = match state.prev_price {
+                Some(prev) => price >= prev,
+                None => true,
+            };
+            let price_color = if is_up { Color::Green } else { Color::Red };
+            execute!(
+                out,
+                cursor::MoveTo(px as u16, price_row as u16),
+                SetForegroundColor(price_color),
+                SetAttribute(Attribute::Bold),
+                Print(&price_str),
+                SetAttribute(Attribute::Reset),
+                ResetColor
+            )?;
+        } else {
+            let msg = "Waiting for data...";
+            let mx = w.saturating_sub(msg.len()) / 2;
+            execute!(
+                out,
+                cursor::MoveTo(mx as u16, price_row as u16),
+                SetForegroundColor(Color::DarkGrey),
+                Print(msg),
+                ResetColor
+            )?;
+        }
+
+        // ── Alert row (only when triggered and flashing) ───────────────────
+        if state.alert.as_ref().and_then(|a| a.last_triggered).is_some() {
+            execute!(out, cursor::MoveTo(0, alert_row as u16), terminal::Clear(ClearType::CurrentLine))?;
+            if let Some(ref alert) = state.alert {
+                let msg = format!(
+                    "⚡ ALERT TRIGGERED — Price went {} ${:.2}",
+                    alert.direction, alert.price
+                );
+                let ax = w.saturating_sub(msg.len()) / 2;
+                let flash_color = if state.alert_flash { Color::Yellow } else { Color::DarkYellow };
+                execute!(
+                    out,
+                    cursor::MoveTo(ax as u16, alert_row as u16),
+                    SetForegroundColor(flash_color),
+                    SetAttribute(Attribute::Bold),
+                    Print(&msg),
+                    SetAttribute(Attribute::Reset),
+                    ResetColor
+                )?;
+            }
+        }
+
+        out.flush()?;
+        Ok(())
+    })
+    .and_then(std::convert::identity)
+}
+
 // ── Main ────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -395,11 +484,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Main event loop ─────────────────────────────────────────────────
     let mut flash_counter: u32 = 0;
-    let mut need_full_redraw = false;
+    let mut need_full_redraw = true; // initial full render after Clear
 
     loop {
+        let mut got_new_price = false;
+
         // Process incoming prices
         while let Ok(price) = rx.try_recv() {
+            got_new_price = true;
             let mut s = state.lock().unwrap();
             s.prev_price = s.price;
             s.price = Some(price);
@@ -434,6 +526,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match event::read()? {
                 Event::Resize(_, _) => need_full_redraw = true,
                 Event::Key(KeyEvent { code, modifiers, .. }) => {
+                    need_full_redraw = true;
                 let mut s = state.lock().unwrap();
 
                 match s.input_mode {
@@ -488,10 +581,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Render
+        // Render: full redraw on resize/key; otherwise only price (and alert when flashing)
         let s = state.lock().unwrap();
-        render(&s, need_full_redraw)?;
-        need_full_redraw = false;
+        if need_full_redraw {
+            render(&s, true)?;
+            need_full_redraw = false;
+        } else if got_new_price || s.alert.as_ref().and_then(|a| a.last_triggered).is_some() {
+            render_partial(&s)?;
+        }
     }
 
     // Cleanup terminal
