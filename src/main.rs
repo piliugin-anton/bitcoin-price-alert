@@ -132,7 +132,7 @@ impl std::fmt::Display for ConnectionStatus {
 
 // ── UI rendering ────────────────────────────────────────────────────────────
 
-fn render(state: &AppState) -> std::io::Result<()> {
+fn render(state: &AppState, full_redraw: bool) -> std::io::Result<()> {
     let (cols, rows) = terminal::size()?;
     let w = cols as usize;
     let center_row = rows / 2;
@@ -142,19 +142,23 @@ fn render(state: &AppState) -> std::io::Result<()> {
     out.sync_update(|out| {
         execute!(out, cursor::Hide, cursor::MoveTo(0, 0))?;
 
-        // Clear only the content rows we're about to write to
-        let content_rows = [
-            1,
-            center_row.saturating_sub(5),
-            center_row.saturating_sub(3),
-            center_row,
-            center_row + 3,
-            center_row + 5,
-            rows.saturating_sub(2),
-        ];
-        for &row in &content_rows {
-            if row > 0 && row <= rows {
-                execute!(out, cursor::MoveTo(0, row), terminal::Clear(ClearType::CurrentLine))?;
+        // On resize: clear entire screen with ClearType::All; otherwise only content rows
+        if full_redraw {
+            execute!(out, terminal::Clear(ClearType::All), cursor::MoveTo(0, 0))?;
+        } else {
+            let content_rows = [
+                1,
+                center_row.saturating_sub(5),
+                center_row.saturating_sub(3),
+                center_row,
+                center_row + 3,
+                center_row + 5,
+                rows.saturating_sub(2),
+            ];
+            for &row in &content_rows {
+                if row > 0 && row <= rows {
+                    execute!(out, cursor::MoveTo(0, row), terminal::Clear(ClearType::CurrentLine))?;
+                }
             }
         }
 
@@ -390,6 +394,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Main event loop ─────────────────────────────────────────────────
     let mut flash_counter: u32 = 0;
+    let mut need_full_redraw = false;
 
     loop {
         // Process incoming prices
@@ -420,9 +425,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             s.alert_flash = flash_counter % 6 < 3;
         }
 
-        // Handle keyboard input
+        // Handle input (keyboard, resize)
         if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(KeyEvent { code, modifiers, .. }) = event::read()? {
+            match event::read()? {
+                Event::Resize(_, _) => need_full_redraw = true,
+                Event::Key(KeyEvent { code, modifiers, .. }) => {
                 let mut s = state.lock().unwrap();
 
                 match s.input_mode {
@@ -473,11 +480,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                 }
             }
+            _ => {}
+            }
         }
 
         // Render
         let s = state.lock().unwrap();
-        render(&s)?;
+        render(&s, need_full_redraw)?;
+        need_full_redraw = false;
     }
 
     // Cleanup terminal
