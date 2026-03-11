@@ -4,6 +4,7 @@ use crossterm::{
     execute,
     style::{Color, Print, SetForegroundColor, ResetColor, Attribute, SetAttribute},
     terminal::{self, ClearType},
+    SynchronizedUpdate,
 };
 use futures_util::StreamExt;
 use rodio::{nz, DeviceSinkBuilder, Player, Source};
@@ -132,20 +133,32 @@ impl std::fmt::Display for ConnectionStatus {
 // ── UI rendering ────────────────────────────────────────────────────────────
 
 fn render(state: &AppState) -> std::io::Result<()> {
-    let mut out = stdout();
     let (cols, rows) = terminal::size()?;
     let w = cols as usize;
-
-    execute!(out, cursor::Hide, cursor::MoveTo(0, 0))?;
-
-    // Clear screen
-    for row in 0..rows {
-        execute!(out, cursor::MoveTo(0, row), terminal::Clear(ClearType::CurrentLine))?;
-    }
-
     let center_row = rows / 2;
 
-    // ── Status line (top right) ─────────────────────────────────────────
+    // Only clear the rows we use; wrap in sync_update so all changes appear at once
+    let mut out = stdout();
+    out.sync_update(|out| {
+        execute!(out, cursor::Hide, cursor::MoveTo(0, 0))?;
+
+        // Clear only the content rows we're about to write to
+        let content_rows = [
+            1,
+            center_row.saturating_sub(5),
+            center_row.saturating_sub(3),
+            center_row,
+            center_row + 3,
+            center_row + 5,
+            rows.saturating_sub(2),
+        ];
+        for &row in &content_rows {
+            if row > 0 && row <= rows {
+                execute!(out, cursor::MoveTo(0, row), terminal::Clear(ClearType::CurrentLine))?;
+            }
+        }
+
+        // ── Status line (top right) ─────────────────────────────────────────
     let status_str = format!("{}", state.status);
     let status_col = if w > status_str.len() + 2 { w - status_str.len() - 2 } else { 0 };
     execute!(out, cursor::MoveTo(status_col as u16, 1))?;
@@ -283,19 +296,21 @@ fn render(state: &AppState) -> std::io::Result<()> {
         }
     }
 
-    // ── Bottom border ───────────────────────────────────────────────────
-    let border = "─".repeat(w.min(60));
-    let bx = w.saturating_sub(border.len()) / 2;
-    execute!(
-        out,
-        cursor::MoveTo(bx as u16, rows.saturating_sub(2)),
-        SetForegroundColor(Color::Rgb { r: 30, g: 30, b: 30 }),
-        Print(&border),
-        ResetColor
-    )?;
+        // ── Bottom border ───────────────────────────────────────────────────
+        let border = "─".repeat(w.min(60));
+        let bx = w.saturating_sub(border.len()) / 2;
+        execute!(
+            out,
+            cursor::MoveTo(bx as u16, rows.saturating_sub(2)),
+            SetForegroundColor(Color::Rgb { r: 30, g: 30, b: 30 }),
+            Print(&border),
+            ResetColor
+        )?;
 
-    out.flush()?;
-    Ok(())
+        out.flush()?;
+        Ok(())
+    })
+    .and_then(std::convert::identity)
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────
