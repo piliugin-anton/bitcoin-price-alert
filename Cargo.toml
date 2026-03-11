@@ -1,0 +1,13 @@
+[package]
+name = "btc-price-alert"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures-util = "0.3"
+rodio = "0.22"
+crossterm = "0.29"
