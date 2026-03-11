@@ -468,7 +468,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let player = Player::connect_new(stream_handle.mixer());
 
     let (tx, mut rx) = mpsc::channel::<f64>(256);
-    let (disconnect_tx, mut disconnect_rx) = mpsc::channel::<()>(8);
 
     // ── WebSocket task ──────────────────────────────────────────────────
     let ws_state = state.clone();
@@ -512,7 +511,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut s = ws_state.lock().unwrap();
                         s.status = ConnectionStatus::Disconnected;
                     }
-                    let _ = disconnect_tx.send(()).await;
                 }
                 Err(_) => {
                     let mut s = ws_state.lock().unwrap();
@@ -529,19 +527,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut flash_counter: u32 = 0;
     let mut need_full_redraw = true; // initial full render after Clear
     let mut last_rendered_status: Option<ConnectionStatus> = None;
+    const DISCONNECT_SOUND_INTERVAL: u64 = 5;
     let mut last_disconnect_sound: Option<Instant> = None;
 
     loop {
         let mut got_new_price = false;
 
-        // Process disconnect events — play alert sound (with debounce)
-        while let Ok(()) = disconnect_rx.try_recv() {
-            let can_trigger = last_disconnect_sound.map_or(true, |t| {
-                t.elapsed() >= Duration::from_secs(ALERT_DEBOUNCE_SECS)
-            });
-            if can_trigger {
-                last_disconnect_sound = Some(Instant::now());
-                play_disconnect_sound(&player);
+        // Play disconnect sound every 5s while disconnected
+        {
+            let s = state.lock().unwrap();
+            if s.status == ConnectionStatus::Disconnected {
+                let should_play = last_disconnect_sound.map_or(true, |t| {
+                    t.elapsed() >= Duration::from_secs(DISCONNECT_SOUND_INTERVAL)
+                });
+                if should_play {
+                    drop(s);
+                    last_disconnect_sound = Some(Instant::now());
+                    play_disconnect_sound(&player);
+                }
+            } else if s.status == ConnectionStatus::Connected {
+                last_disconnect_sound = None;
             }
         }
 
