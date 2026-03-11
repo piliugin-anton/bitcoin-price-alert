@@ -69,7 +69,8 @@ fn generate_sine_wave(frequency: f32, duration_ms: u64, volume: f32) -> Vec<f32>
 
 fn play_alert_sound() {
     std::thread::spawn(|| {
-        if let Ok(stream_handle) = DeviceSinkBuilder::open_default_sink() {
+        if let Ok(mut stream_handle) = DeviceSinkBuilder::open_default_sink() {
+            stream_handle.log_on_drop(false);
             let player = Player::connect_new(stream_handle.mixer());
                 // C5 → E5 → G5 ascending triad, played twice
                 let notes = [523.25f32, 659.25, 783.99];
