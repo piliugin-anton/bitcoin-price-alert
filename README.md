@@ -9,6 +9,7 @@ Terminal app that shows live Bitcoin price from Binance and plays a sound when p
   ```bash
   sudo apt install libasound2-dev pkg-config
   ```
+- **Windows:** no additional dependencies (audio via WASAPI)
 
 ## Usage
 
