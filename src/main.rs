@@ -8,8 +8,10 @@ use crossterm::{
 };
 use futures_util::StreamExt;
 use rodio::{nz, DeviceSinkBuilder, Player, Source};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::fs;
 use std::io::{stdout, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -25,7 +27,8 @@ struct BinanceTrade {
 
 // ── Alert configuration ─────────────────────────────────────────────────────
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 enum AlertDirection {
     Above,
     Below,
@@ -41,6 +44,12 @@ impl std::fmt::Display for AlertDirection {
 }
 
 const ALERT_DEBOUNCE_SECS: u64 = 5;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SavedAlert {
+    price: f64,
+    direction: AlertDirection,
+}
 
 #[derive(Clone, Debug)]
 struct Alert {
@@ -159,6 +168,46 @@ impl std::fmt::Display for ConnectionStatus {
             ConnectionStatus::Disconnected => write!(f, "DISCONNECTED"),
         }
     }
+}
+
+// ── Alert persistence ───────────────────────────────────────────────────────
+
+fn alerts_file_path() -> Option<PathBuf> {
+    directories::ProjectDirs::from("", "", "btc-price-alert")
+        .map(|d| d.config_dir().join("alerts.json"))
+}
+
+fn load_alert() -> Option<Alert> {
+    let path = alerts_file_path()?;
+    let contents = fs::read_to_string(&path).ok()?;
+    let saved: Option<SavedAlert> = serde_json::from_str(&contents).ok()?;
+    let saved = saved?;
+    if saved.price <= 0.0 {
+        return None;
+    }
+    Some(Alert {
+        price: saved.price,
+        direction: saved.direction,
+        last_triggered: None,
+    })
+}
+
+fn save_alert(alert: Option<&Alert>) -> std::io::Result<()> {
+    let path = alerts_file_path().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "config dir not found")
+    })?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let saved: Option<SavedAlert> = alert.map(|a| SavedAlert {
+        price: a.price,
+        direction: a.direction.clone(),
+    });
+    let json = serde_json::to_string_pretty(&saved)?;
+    let temp_path = path.with_extension("json.tmp");
+    fs::write(&temp_path, json)?;
+    fs::rename(temp_path, path)?;
+    Ok(())
 }
 
 // ── UI rendering ────────────────────────────────────────────────────────────
@@ -451,10 +500,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         terminal::Clear(ClearType::All)
     )?;
 
+    let initial_alert = load_alert();
     let state = Arc::new(Mutex::new(AppState {
         price: None,
         prev_price: None,
-        alert: None,
+        alert: initial_alert,
         input_mode: InputMode::Normal,
         input_buffer: String::new(),
         alert_direction: AlertDirection::Above,
@@ -601,6 +651,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         KeyCode::Char('c') | KeyCode::Char('C') => {
                             s.alert = None;
+                            let _ = save_alert(None);
                         }
                         _ => {}
                     },
@@ -618,11 +669,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Enter => {
                             if let Ok(price) = s.input_buffer.parse::<f64>() {
                                 if price > 0.0 {
-                                    s.alert = Some(Alert {
+                                    let alert = Alert {
                                         price,
                                         direction: s.alert_direction.clone(),
                                         last_triggered: None,
-                                    });
+                                    };
+                                    let _ = save_alert(Some(&alert));
+                                    s.alert = Some(alert);
                                 }
                             }
                             s.input_mode = InputMode::Normal;
