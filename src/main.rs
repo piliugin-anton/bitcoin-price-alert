@@ -78,16 +78,12 @@ fn generate_sine_wave(frequency: f32, duration_ms: u64, volume: f32) -> Vec<f32>
     samples
 }
 
-fn play_alert_sound(player: &Player, direction: &AlertDirection) {
-    // C5 → E5 → G5 triad; Above = ascending, Below = descending
-    let notes = [523.25f32, 659.25, 783.99];
-    let notes_ordered: Vec<f32> = match direction {
-        AlertDirection::Above => notes.to_vec(),
-        AlertDirection::Below => notes.iter().copied().rev().collect(),
-    };
+fn play_alert_sound(player: &Player, _direction: &AlertDirection) {
+    // "Profit Ping" — C5 → E5 → G5 → C6, fast ascending (both Above and Below)
+    let notes = [523.25f32, 659.25, 783.99, 1046.50]; // C5, E5, G5, C6
     for _repeat in 0..2 {
-        for &freq in &notes_ordered {
-            let samples = generate_sine_wave(freq, 150, 0.4);
+        for &freq in &notes {
+            let samples = generate_sine_wave(freq, 100, 0.4);
             let source = rodio::buffer::SamplesBuffer::new(nz!(1), nz!(44100), samples);
             player.append(source);
             player.append(rodio::source::Zero::new(nz!(1), nz!(44100)).take_duration(
