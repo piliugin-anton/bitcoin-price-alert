@@ -133,6 +133,18 @@ fn play_disconnect_sound(player: &Player) {
     player.append(rodio::buffer::SamplesBuffer::new(nz!(1), nz!(44100), g4_samples));
 }
 
+fn play_connect_sound(player: &Player) {
+    // Reverse of disconnect: G4 then C5 (ascending instead of descending)
+    const C5: f32 = 523.25;
+    const G4: f32 = 392.00;
+
+    let g4_samples = generate_sine_wave(G4, 300, 0.5);
+    player.append(rodio::buffer::SamplesBuffer::new(nz!(1), nz!(44100), g4_samples));
+
+    let c5_samples = generate_sine_wave_fade_out(C5, 200, 0.5, 50);
+    player.append(rodio::buffer::SamplesBuffer::new(nz!(1), nz!(44100), c5_samples));
+}
+
 // ── Application state ───────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -698,9 +710,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Render: full redraw on resize/key; otherwise price, status, alert when changed
         let s = state.lock().unwrap();
         let status_changed = last_rendered_status.as_ref() != Some(&s.status);
+        let transition_to_connected = status_changed && s.status == ConnectionStatus::Connected;
         if status_changed {
             last_rendered_status = Some(s.status.clone());
         }
+        let s = if transition_to_connected {
+            drop(s);
+            play_connect_sound(&player);
+            state.lock().unwrap()
+        } else {
+            s
+        };
         if need_full_redraw {
             render(&s, true)?;
             need_full_redraw = false;
